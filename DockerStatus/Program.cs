@@ -1,119 +1,108 @@
 ﻿using Docker.DotNet;
 using Docker.DotNet.Models;
 using DockerStatus;
-using System.Globalization;
 
-DockerClient client = new DockerClientConfiguration().CreateClient();
+const ConsoleColor white = ConsoleColor.White;
+const ConsoleColor red = ConsoleColor.Red;
+const ConsoleColor yellow = ConsoleColor.Yellow;
 
+// Set encoding to display special characters correctly.
 Console.OutputEncoding = System.Text.Encoding.UTF8;
+
+DockerClient? client = null;
+var previousWidth = 0;
+IList<ContainerListResponse> previousResponse = new List<ContainerListResponse>();
 
 while (true)
 {
-    var res = await client.Containers.ListContainersAsync(new ContainersListParameters { Limit = 100 });
+    try
+    {
+        if (client is null)
+        {
+            await Initialize();
+        }
+        
+        await Update(client!, previousWidth);
+        
+        await Task.Delay(750);
+    }
+    catch (Exception ex)
+    {
+        ConsoleHelpers.ResetConsole();
+        
+        "Ooops... something went wrong.".WriteLineWith(red);
+        "Details: ".WriteWith(white);
+        $"{ex.GetType().FullName}: {ex.Message}".WriteLineWith(yellow);
 
-    Console.Clear();
-    Console.CursorTop = 0;
-    Console.CursorLeft = 0;
-
-    Write(res.ToList());
-
-    await Task.Delay(750);
+        // Clear client to trigger re-initialization in the next iteration.
+        client = null;
+        // Set width to 0 to trigger re-rendering if the next response is successful,
+        // but the same as the last successful result was.
+        previousWidth = 0;
+        
+        await Task.Delay(5000);
+    }
 }
 
-void Write(List<ContainerListResponse> items)
+async Task Initialize()
 {
-    var totalWidth = Console.WindowWidth % 2 == 0 ? Console.WindowWidth - 1 : Console.WindowWidth;
+    client = new DockerClientConfiguration().CreateClient();
 
-    Console.ForegroundColor = ConsoleColor.White;
-    Console.WriteLine("╭─ Docker containers ─".PadRight(totalWidth - 1, '─') + "╮");
+    // Get 1 container to check if the docker host is available.
+    await client.Containers.ListContainersAsync(new ContainersListParameters { Limit = 1 });
+}
 
-    if(items.Count > 0)
+async Task Update(IDockerClient dockerClient, int oldWidth)
+{
+    var width = Console.WindowWidth;
+    var response = await dockerClient.Containers.ListContainersAsync(new ContainersListParameters { Limit = 1000 });
+
+    // Only redraw the console if the size or the response data has changed.
+    if (width != oldWidth || HasResponseChanged(previousResponse, response))
     {
-        var runningContainers = items.Where(i => i.State == "running").ToList();
-        if (runningContainers.Count != 0)
+        ConsoleHelpers.ResetConsole();
+
+        Renderer.RenderResult(response);
+
+        previousWidth = width;
+        previousResponse = response;
+    }
+}
+
+bool HasResponseChanged(IList<ContainerListResponse> oldList, IList<ContainerListResponse> newList)
+{
+    if (oldList.Count != newList.Count)
+    {
+        return true;
+    }
+
+    for (var i = 0; i < oldList.Count; i++)
+    {
+        var a = oldList[i];
+        var b = newList[i];
+
+        if (string.Equals(a.ID, b.ID, StringComparison.OrdinalIgnoreCase) == false)
         {
-            WriteLineWithBorder(
-                "╭─── Running containers ─".PadRight(totalWidth - 3, '─') + "╮",
-                ConsoleColor.Green);
-
-            foreach (var container in runningContainers)
-            {
-                WriteElement(container, ConsoleColor.Green, totalWidth);
-            }
-
-            WriteLineWithBorder(
-                "╰─".PadRight(totalWidth - 3, '─') + "╯",
-                ConsoleColor.Green);
+            return true;
+        }
+        
+        if (string.Equals(a.State, b.State, StringComparison.OrdinalIgnoreCase) == false)
+        {
+            return true;
         }
 
-        var notRunningContainers = items.Where(i => i.State != "running").ToList();
-        if (notRunningContainers.Count != 0)
+        if (a.State.IsRunning() &&
+            string.Equals(a.Status, b.Status, StringComparison.OrdinalIgnoreCase) == false)
         {
-            WriteLineWithBorder("╭─── Other containers ─".PadRight(totalWidth - 3, '─') + "╮",
-                ConsoleColor.DarkGray);
+            return true;
+        }
 
-            foreach (var container in notRunningContainers)
-            {
-                WriteElement(container, ConsoleColor.DarkGray, totalWidth);
-            }
-
-            WriteLineWithBorder(
-                "╰─".PadRight(totalWidth - 3, '─') + "╯",
-                ConsoleColor.DarkGray);
+        if (a.State.IsRunning() == false &&
+            string.Equals(a.Status.Split(' ')[0], b.Status.Split(' ')[0], StringComparison.OrdinalIgnoreCase) == false)
+        {
+            return true;
         }
     }
-    else
-    {
-        WriteLineWithBorder(GetEmptyMessage(totalWidth), ConsoleColor.Yellow);
-    }
 
-    Console.ForegroundColor = ConsoleColor.White;
-    Console.WriteLine("╰─".PadRight(totalWidth - 1, '─') + "╯");
-}
-
-void WriteElement(ContainerListResponse container, ConsoleColor borderColor, int totalwidth)
-{
-    var itemLength = (totalwidth - 59) / 2;
-
-    Console.ForegroundColor = ConsoleColor.White;
-    Console.Write("│");
-    Console.ForegroundColor = borderColor;
-    Console.Write("│ ");
-    Console.ForegroundColor = ConsoleColor.DarkGray;
-    Console.Write(container.ID.Substring(0, 12).ToLength(17));
-
-    Console.ForegroundColor = ConsoleColor.White;
-    Console.Write(container.Image.ToLength(itemLength));
-
-    Console.ForegroundColor = ConsoleColor.Blue;
-    Console.Write(container.Names[0].TrimStart('/').ToLength(itemLength));
-
-    Console.ForegroundColor = ConsoleColor.DarkGray;
-    Console.Write(container.Status.Split(' ')[0].ToLength(22));
-
-    Console.ForegroundColor = ConsoleColor.DarkGray;
-    Console.Write($"{container.Created.ToString("MM/dd HH:mm:ss", CultureInfo.InvariantCulture)}");
-
-    Console.ForegroundColor = borderColor;
-    Console.Write(" │");
-    Console.ForegroundColor = ConsoleColor.White;
-    Console.WriteLine("│");
-}
-
-void WriteLineWithBorder(string message, ConsoleColor color)
-{
-    Console.ForegroundColor = ConsoleColor.White;
-    Console.Write("│");
-    Console.ForegroundColor = color;
-    Console.Write(message);
-    Console.ForegroundColor = ConsoleColor.White;
-    Console.WriteLine("│");
-}
-
-string GetEmptyMessage(int width)
-{
-    var shrug = "¯\\_(ツ)_/¯";
-    var padding = new string(' ', (width - 12) / 2);
-
-    return $"{padding}{shrug}{padding} ";
+    return false;
 }
